@@ -3,6 +3,7 @@ from telebot import types
 import os
 import threading
 from flask import Flask
+import time
 
 # ====== BOT TOKEN ======
 bot = telebot.TeleBot(os.getenv("BOT_TOKEN"))
@@ -19,7 +20,7 @@ PORT = int(os.environ.get("PORT", 10000))
 def run_web():
     app.run(host="0.0.0.0", port=PORT)
 
-threading.Thread(target=run_web).start()
+threading.Thread(target=run_web, daemon=True).start()
 
 # ====== ВОПРОСЫ ======
 questions = [
@@ -41,6 +42,17 @@ user_data = {}
 # ================= START =================
 @bot.message_handler(commands=['start'])
 def start(message):
+    user_id = message.from_user.id
+
+    user_data[user_id] = {
+        "fio": "",
+        "q_index": 0,
+        "yes": 0,
+        "active": False,
+        "answered": False,
+        "start_time": None
+    }
+
     keyboard = types.InlineKeyboardMarkup()
     keyboard.add(
         types.InlineKeyboardButton("Да", callback_data="consult_yes"),
@@ -61,10 +73,15 @@ def start(message):
         reply_markup=keyboard
     )
 
-
 # ================= HELP =================
 @bot.message_handler(commands=['help'])
-def help(message):
+def help_command(message):
+    user_id = message.from_user.id
+
+    if user_id in user_data and user_data[user_id].get("active"):
+        bot.send_message(message.chat.id, "Вы сейчас проходите тест! Сначала завершите его.")
+        return
+
     bot.send_message(
         message.chat.id,
         "📌 Помощь\n\n"
@@ -79,10 +96,15 @@ def help(message):
         "/start /help /about /restart"
     )
 
-
 # ================= ABOUT =================
 @bot.message_handler(commands=['about'])
 def about(message):
+    user_id = message.from_user.id
+
+    if user_id in user_data and user_data[user_id].get("active"):
+        bot.send_message(message.chat.id, "Вы сейчас проходите тест! Сначала завершите его.")
+        return
+
     bot.send_message(
         message.chat.id,
         "🤖 Consultation for Teaching\n\n"
@@ -90,31 +112,38 @@ def about(message):
         "Разработчик: @Pervyi_Pervyi_Chel_Ne_Levyi"
     )
 
-
 # ================= RESTART =================
 @bot.message_handler(commands=['restart'])
 def restart(message):
     user_id = message.from_user.id
 
-    if user_id in user_data:
-        user_data[user_id] = {
-            "fio": "",
-            "q_index": 0,
-            "yes": 0
-        }
+    user_data[user_id] = {
+        "fio": "",
+        "q_index": 0,
+        "yes": 0,
+        "active": False,
+        "answered": False,
+        "start_time": None
+    }
 
     bot.send_message(
         message.chat.id,
         "🔄 Тест сброшен. Нажмите /start чтобы начать заново."
     )
 
-
 # ================= CALLBACK =================
 @bot.callback_query_handler(func=lambda call: True)
 def callback(call):
     user_id = call.from_user.id
 
+    if user_id not in user_data:
+        return
+
     if call.data == "consult_yes":
+        if user_data[user_id]["active"]:
+            bot.answer_callback_query(call.id, "Вы уже проходите тест!", show_alert=True)
+            return
+
         bot.send_message(call.message.chat.id, "Хорошо! Пожалуйста, напишите ваше ФИО")
         bot.register_next_step_handler(call.message, get_name)
 
@@ -124,6 +153,10 @@ def callback(call):
     elif call.data == "name_yes":
         user_data[user_id]["q_index"] = 0
         user_data[user_id]["yes"] = 0
+        user_data[user_id]["active"] = True
+        user_data[user_id]["answered"] = False
+        user_data[user_id]["start_time"] = time.time()
+
         ask_question(call.message.chat.id, user_id)
 
     elif call.data == "name_no":
@@ -131,86 +164,17 @@ def callback(call):
         bot.register_next_step_handler(call.message, get_name)
 
     elif call.data in ["q_yes", "q_no"]:
+        if not user_data[user_id]["active"]:
+            bot.answer_callback_query(call.id, "Сначала начните тест через /start", show_alert=True)
+            return
+
+        if user_data[user_id]["answered"]:
+            bot.answer_callback_query(call.id, "Вы сейчас отвечаете на другой вопрос!", show_alert=True)
+            return
+
+        user_data[user_id]["answered"] = True
+
         if call.data == "q_no":
             user_data[user_id]["yes"] += 1
 
-        user_data[user_id]["q_index"] += 1
-        ask_question(call.message.chat.id, user_id)
-
-
-# ================= ФИО =================
-def get_name(message):
-    user_id = message.from_user.id
-
-    user_data[user_id] = {
-        "fio": message.text,
-        "q_index": 0,
-        "yes": 0
-    }
-
-    keyboard = types.InlineKeyboardMarkup()
-    keyboard.add(
-        types.InlineKeyboardButton("Да", callback_data="name_yes"),
-        types.InlineKeyboardButton("Нет", callback_data="name_no")
-    )
-
-    bot.send_message(
-        message.chat.id,
-        f"Ваше ФИО: {message.text}\nЕсли вы ошиблись — нажмите Нет",
-        reply_markup=keyboard
-    )
-
-
-# ================= ВОПРОСЫ =================
-def ask_question(chat_id, user_id):
-    index = user_data[user_id]["q_index"]
-
-    if index < len(questions):
-        keyboard = types.InlineKeyboardMarkup()
-        keyboard.add(
-            types.InlineKeyboardButton("Да", callback_data="q_yes"),
-            types.InlineKeyboardButton("Нет", callback_data="q_no")
-        )
-
-        bot.send_message(
-            chat_id,
-            f"Вопрос {index + 1}/10\n\n{questions[index]}",
-            reply_markup=keyboard
-        )
-    else:
-        show_result(chat_id, user_id)
-
-
-# ================= РЕЗУЛЬТАТ =================
-def show_result(chat_id, user_id):
-    score = user_data[user_id]["yes"]
-    fio = user_data[user_id]["fio"]
-
-    if score <= 3:
-        result_text = "Вам определённо нужна консультация"
-    elif score <= 6:
-        result_text = "Нормально, но нужно подтянуть знания"
-    else:
-        result_text = "Ахуенно, уровень хороший"
-
-    bot.send_message(
-        chat_id,
-        f"Результат: {fio} {score}/10\n"
-        f"{result_text}\n\n"
-        f"Вы можете отправить результат: @miss_liza_almaty\n\n"
-        f"Бот создан: @Pervyi_Pervyi_Chel_Ne_Levyi\n"
-        f"Если нужны подобные боты — пишите, по цене договоримся."
-        )
-
-
-# ================= ЗАПУСК =================
-import time
-
-print("Bot started")
-
-while True:
-    try:
-        bot.infinity_polling(timeout=60, long_polling_timeout=60)
-    except Exception as e:
-        print(f"Ошибка: {e}")
-        time.sleep(5)
+        user_data[user_id]["q_index"]
